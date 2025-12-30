@@ -3,6 +3,10 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.vectorstores import InMemoryVectorStore
+from typing import List
+from langchain_core.documents import Document
+from langchain_core.runnables import chain
+
 
 ## pdf loading
 file_path = "./nke-10k-2023.pdf"
@@ -26,16 +30,28 @@ assert len(vector_1) == len(vector_2)
 ## Vectore stores
 vector_store = InMemoryVectorStore(embeddings)
 ids = vector_store.add_documents(documents=all_splits)
-# results = vector_store.similarity_search(
-#     "How many distribution centers does Nike have in the US?"
-# )
-#
+results = vector_store.similarity_search(
+    "How many distribution centers does Nike have in the US?"
+)
+
 # print(results[0])
 embedding = embeddings.embed_query("How were Nike's margins impacted in 2023?")
 
 results = vector_store.similarity_search_by_vector(embedding)
-print(results[0])
-# results = vector_store.similarity_search_with_score("What was Nike's revenue in 2023?")
-# doc, score = results[0]
+# print(results[0])
+results = vector_store.similarity_search_with_score("What was Nike's revenue in 2023?")
+doc, score = results[0]
 # print(f"Score: {score}\n")
 # print(doc)
+
+@chain
+def retriever(query: str) -> List[Document]:
+    return vector_store.similarity_search(query, k=1)
+
+
+print(retriever.batch(
+    [
+        "How many distribution centers does Nike have in the US?",
+        "When was Nike incorporated?",
+    ],
+))
