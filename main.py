@@ -1,12 +1,11 @@
-from langchain_ollama import OllamaEmbeddings, ChatOllama
-from langchain.agents import create_agent
-from langchain_core.vectorstores import InMemoryVectorStore
-import bs4
-from langchain.agents.middleware import dynamic_prompt, ModelRequest
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.tools import tool
 from langchain.chat_models import init_chat_model
+import requests, pathlib
+from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits import SQLDatabaseToolkit
+from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command 
 
 model = init_chat_model(
         model_provider="ollama",
@@ -15,51 +14,86 @@ model = init_chat_model(
         base_url="http://localhost:11434"
         )
 
-embeddings = OllamaEmbeddings(model="qwen2.5:7b")
-vector_store = InMemoryVectorStore(embeddings)
+url = "https://storage.googleapis.com/benchmarks-artifacts/chinook/Chinook.db"
+local_path = pathlib.Path("Chinook.db")
 
-## Loading Document
-# Only keep post title, headers, and content from the full HTML.
-bs4_strainer = bs4.filter.SoupStrainer(class_=("post-title", "post-header", "post-content"))
-loader = WebBaseLoader(
-    web_paths=("https://lilianweng.github.io/posts/2023-06-23-agent/",),
-    bs_kwargs={"parse_only": bs4_strainer},
+if local_path.exists():
+    print(f"{local_path} already exists, skipping download.")
+else:
+    response = requests.get(url)
+    if response.status_code == 200:
+        local_path.write_bytes(response.content)
+        print(f"File downloaded and saved as {local_path}")
+    else:
+        print(f"Failed to download the file. Status code: {response.status_code}")
+
+db = SQLDatabase.from_uri("sqlite:///Chinook.db")
+
+print(f"Dialect: {db.dialect}")
+print(f"Available tables: {db.get_usable_table_names()}")
+print(f'Sample output: {db.run("SELECT * FROM Artist LIMIT 5;")}')
+
+toolkit = SQLDatabaseToolkit(db=db, llm=model)
+
+tools = toolkit.get_tools()
+
+for tool in tools:
+    print(f"{tool.name}: {tool.description}\n")
+
+system_prompt = """
+You are an agent designed to interact with a SQL database.
+Given an input question, create a syntactically correct {dialect} query to run,
+then look at the results of the query and return the answer. Unless the user
+specifies a specific number of examples they wish to obtain, always limit your
+query to at most {top_k} results.
+
+You can order the results by a relevant column to return the most interesting
+examples in the database. Never query for all the columns from a specific table,
+only ask for the relevant columns given the question.
+
+You MUST double check your query before executing it. If you get an error while
+executing a query, rewrite the query and try again.
+
+DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the
+database.
+
+To start you should ALWAYS look at the tables in the database to see what you
+can query. Do NOT skip this step.
+
+Then you should query the schema of the most relevant tables.
+""".format(
+    dialect=db.dialect,
+    top_k=5,
 )
-docs = loader.load()
 
-assert len(docs) == 1
 
-## Splitting Document
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,  # chunk size (characters)
-    chunk_overlap=200,  # chunk overlap (characters)
-    add_start_index=True,  # track index in original document
+agent = create_agent(
+    model,
+    tools,
+    system_prompt=system_prompt,
+    middleware=[ 
+        HumanInTheLoopMiddleware( 
+            interrupt_on={"sql_db_query": True}, 
+            description_prefix="Tool execution pending approval", 
+        ), 
+    ], 
+    checkpointer= InMemorySaver(), 
 )
-all_splits = text_splitter.split_documents(docs)
 
-## Storing Document
-document_ids = vector_store.add_documents(documents=all_splits)
+question = "Which genre on average has the longest tracks?"
+config = {"configurable": {"thread_id": "1"}} 
 
-@dynamic_prompt
-def prompt_with_context(request: ModelRequest) -> str:
-    """Inject context into state messages."""
-    last_query = request.state["messages"][-1].text
-    retrieved_docs = vector_store.similarity_search(last_query)
-
-    docs_content = "\n\n".join(doc.page_content for doc in retrieved_docs)
-
-    system_message = (
-        "You are a helpful assistant. Use the following context in your response:"
-        f"\n\n{docs_content}"
-    )
-
-    return system_message
-
-
-agent = create_agent(model, tools=[], middleware=[prompt_with_context])
-query = "What is task decomposition?"
 for step in agent.stream(
-    {"messages": [{"role": "user", "content": query}]},
+    Command(resume={"decisions": [{"type": "approve"}]}), 
+    config, 
     stream_mode="values",
 ):
-    step["messages"][-1].pretty_print()
+    if "__interrupt__" in step: 
+        print("INTERRUPTED:") 
+        interrupt = step["__interrupt__"][0] 
+        for request in interrupt.value["action_requests"]: 
+            print(request["description"]) 
+    elif "messages" in step:
+        step["messages"][-1].pretty_print()
+    else:
+        pass
