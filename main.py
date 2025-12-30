@@ -1,99 +1,229 @@
 from langchain.chat_models import init_chat_model
-import requests, pathlib
-from langchain_community.utilities import SQLDatabase
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
+from langchain.tools import tool
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware 
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.memory import InMemorySaver 
 from langgraph.types import Command 
 
 model = init_chat_model(
-        model_provider="ollama",
-        model="qwen2.5:7b",
-        temperature=0,
-        base_url="http://localhost:11434"
-        )
-
-url = "https://storage.googleapis.com/benchmarks-artifacts/chinook/Chinook.db"
-local_path = pathlib.Path("Chinook.db")
-
-if local_path.exists():
-    print(f"{local_path} already exists, skipping download.")
-else:
-    response = requests.get(url)
-    if response.status_code == 200:
-        local_path.write_bytes(response.content)
-        print(f"File downloaded and saved as {local_path}")
-    else:
-        print(f"Failed to download the file. Status code: {response.status_code}")
-
-db = SQLDatabase.from_uri("sqlite:///Chinook.db")
-
-print(f"Dialect: {db.dialect}")
-print(f"Available tables: {db.get_usable_table_names()}")
-print(f'Sample output: {db.run("SELECT * FROM Artist LIMIT 5;")}')
-
-toolkit = SQLDatabaseToolkit(db=db, llm=model)
-
-tools = toolkit.get_tools()
-
-for tool in tools:
-    print(f"{tool.name}: {tool.description}\n")
-
-system_prompt = """
-You are an agent designed to interact with a SQL database.
-Given an input question, create a syntactically correct {dialect} query to run,
-then look at the results of the query and return the answer. Unless the user
-specifies a specific number of examples they wish to obtain, always limit your
-query to at most {top_k} results.
-
-You can order the results by a relevant column to return the most interesting
-examples in the database. Never query for all the columns from a specific table,
-only ask for the relevant columns given the question.
-
-You MUST double check your query before executing it. If you get an error while
-executing a query, rewrite the query and try again.
-
-DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the
-database.
-
-To start you should ALWAYS look at the tables in the database to see what you
-can query. Do NOT skip this step.
-
-Then you should query the schema of the most relevant tables.
-""".format(
-    dialect=db.dialect,
-    top_k=5,
+    "qwen2.5:7b",
+    model_provider="ollama",
+    temperature=0.7,
+    max_tokens=1024,
 )
 
+## Tools
+@tool
+def create_calendar_event(
+    title: str,
+    start_time: str,       # ISO format: "2024-01-15T14:00:00"
+    end_time: str,         # ISO format: "2024-01-15T15:00:00"
+    attendees: list[str],  # email addresses
+    location: str = ""
+) -> str:
+    """Create a calendar event. Requires exact ISO datetime format."""
+    # Stub: In practice, this would call Google Calendar API, Outlook API, etc.
+    return f"Event created: {title} from {start_time} to {end_time} with {len(attendees)} attendees"
 
-agent = create_agent(
+
+@tool
+def send_email(
+    to: list[str],  # email addresses
+    subject: str,
+    body: str,
+    cc: list[str] = []
+) -> str:
+    """Send an email via email API. Requires properly formatted addresses."""
+    # Stub: In practice, this would call SendGrid, Gmail API, etc.
+    return f"Email sent to {', '.join(to)} - Subject: {subject}"
+
+
+@tool
+def get_available_time_slots(
+    attendees: list[str],
+    date: str,  # ISO format: "2024-01-15"
+    duration_minutes: int
+) -> list[str]:
+    """Check calendar availability for given attendees on a specific date."""
+    # Stub: In practice, this would query calendar APIs
+    return ["09:00", "14:00", "16:00"]
+@tool
+def schedule_event(request: str) -> str:
+    """Schedule calendar events using natural language.
+
+    Use this when the user wants to create, modify, or check calendar appointments.
+    Handles date/time parsing, availability checking, and event creation.
+
+    Input: Natural language scheduling request (e.g., 'meeting with design team
+    next Tuesday at 2pm')
+    """
+    result = calendar_agent.invoke({
+        "messages": [{"role": "user", "content": request}]
+    })
+    return result["messages"][-1].text
+
+
+@tool
+def manage_email(request: str) -> str:
+    """Send emails using natural language.
+
+    Use this when the user wants to send notifications, reminders, or any email
+    communication. Handles recipient extraction, subject generation, and email
+    composition.
+
+    Input: Natural language email request (e.g., 'send them a reminder about
+    the meeting')
+    """
+    result = email_agent.invoke({
+        "messages": [{"role": "user", "content": request}]
+    })
+    return result["messages"][-1].text
+
+
+## Calendar Agent
+CALENDAR_AGENT_PROMPT = (
+    "You are a calendar scheduling assistant. "
+    "Parse natural language scheduling requests (e.g., 'next Tuesday at 2pm') "
+    "into proper ISO datetime formats. "
+    "Use get_available_time_slots to check availability when needed. "
+    "Use create_calendar_event to schedule events. "
+    "Always confirm what was scheduled in your final response."
+)
+
+calendar_agent = create_agent(
     model,
-    tools,
-    system_prompt=system_prompt,
+    tools=[create_calendar_event, get_available_time_slots],
+    system_prompt=CALENDAR_AGENT_PROMPT,
     middleware=[ 
         HumanInTheLoopMiddleware( 
-            interrupt_on={"sql_db_query": True}, 
-            description_prefix="Tool execution pending approval", 
+            interrupt_on={"create_calendar_event": True}, 
+            description_prefix="Calendar event pending approval", 
         ), 
-    ], 
-    checkpointer= InMemorySaver(), 
+    ],
+)
+# query = "Schedule a team meeting next Tuesday at 2pm for 1 hour"
+#
+# for step in calendar_agent.stream(
+#     {"messages": [{"role": "user", "content": query}]}
+# ):
+#     for update in step.values():
+#         for message in update.get("messages", []):
+#             message.pretty_print()
+#
+
+## Email Agent
+EMAIL_AGENT_PROMPT = (
+    "You are an email assistant. "
+    "Compose professional emails based on natural language requests. "
+    "Extract recipient information and craft appropriate subject lines and body text. "
+    "Use send_email to send the message. "
+    "Always confirm what was sent in your final response."
 )
 
-question = "Which genre on average has the longest tracks?"
-config = {"configurable": {"thread_id": "1"}} 
+email_agent = create_agent(
+    model,
+    tools=[send_email],
+    system_prompt=EMAIL_AGENT_PROMPT,
+    middleware=[ 
+        HumanInTheLoopMiddleware( 
+            interrupt_on={"send_email": True}, 
+            description_prefix="Outbound email pending approval", 
+        ), 
+    ], 
+)
+# query = "Send the design team a reminder about reviewing the new mockups"
+#
+# for step in email_agent.stream(
+#     {"messages": [{"role": "user", "content": query}]}
+# ):
+#     for update in step.values():
+#         for message in update.get("messages", []):
+#             message.pretty_print()
+SUPERVISOR_PROMPT = (
+    "You are a helpful personal assistant. "
+    "You can schedule calendar events and send emails. "
+    "Break down user requests into appropriate tool calls and coordinate the results. "
+    "When a request involves multiple actions, use multiple tools in sequence."
+)
 
-for step in agent.stream(
-    Command(resume={"decisions": [{"type": "approve"}]}), 
-    config, 
-    stream_mode="values",
+supervisor_agent = create_agent(
+    model,
+    tools=[schedule_event ,manage_email],
+    system_prompt=SUPERVISOR_PROMPT,
+    checkpointer=InMemorySaver(), 
+)
+# query = "Schedule a team standup for tomorrow at 9am"
+#
+# for step in supervisor_agent.stream(
+#     {"messages": [{"role": "user", "content": query}]}
+# ):
+#     for update in step.values():
+#         for message in update.get("messages", []):
+#             message.pretty_print()
+#
+#
+# print("\n\n\n\nEnd of query1\n\n\n\n")
+# query = (
+#     "Schedule a meeting with the design team next Tuesday at 2pm for 1 hour, "
+#     "and send them an email reminder about reviewing the new mockups."
+# )
+#
+# for step in supervisor_agent.stream(
+#     {"messages": [{"role": "user", "content": query}]}
+# ):
+#     for update in step.values():
+#         for message in update.get("messages", []):
+#             message.pretty_print()
+query = (
+    "Schedule a meeting with the design team next Tuesday at 2pm for 1 hour, "
+    "and send them an email reminder about reviewing the new mockups."
+)
+
+config = {"configurable": {"thread_id": "6"}}
+
+interrupts = []
+for step in supervisor_agent.stream(
+    {"messages": [{"role": "user", "content": query}]},
+    config,
 ):
-    if "__interrupt__" in step: 
-        print("INTERRUPTED:") 
-        interrupt = step["__interrupt__"][0] 
-        for request in interrupt.value["action_requests"]: 
-            print(request["description"]) 
-    elif "messages" in step:
-        step["messages"][-1].pretty_print()
+    for update in step.values():
+        if isinstance(update, dict):
+            for message in update.get("messages", []):
+                message.pretty_print()
+        else:
+            interrupt_ = update[0]
+            interrupts.append(interrupt_)
+            print(f"\nINTERRUPTED: {interrupt_.id}")
+
+
+# for interrupt_ in interrupts:
+#     for request in interrupt_.value["action_requests"]:
+#         print(f"INTERRUPTED: {interrupt_.id}")
+#         print(f"{request['description']}\n")
+#96557608829058d2f68309b37837d552
+
+resume = {}
+for interrupt_ in interrupts:
+    if interrupt_.id == "96557608829058d2f68309b37837d552":
+        # Edit email
+        edited_action = interrupt_.value["action_requests"][0].copy()
+        edited_action["arguments"]["subject"] = "Mockups reminder"
+        resume[interrupt_.id] = {
+            "decisions": [{"type": "edit", "edited_action": edited_action}]
+        }
     else:
-        pass
+        resume[interrupt_.id] = {"decisions": [{"type": "approve"}]}
+
+interrupts = []
+for step in supervisor_agent.stream(
+    Command(resume=resume), 
+    config,
+):
+    for update in step.values():
+        if isinstance(update, dict):
+            for message in update.get("messages", []):
+                message.pretty_print()
+        else:
+            interrupt_ = update[0]
+            interrupts.append(interrupt_)
+            print(f"\nINTERRUPTED: {interrupt_.id}")
