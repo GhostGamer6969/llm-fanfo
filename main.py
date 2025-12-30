@@ -1,45 +1,32 @@
-from langchain_ollama import ChatOllama
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.vectorstores import InMemoryVectorStore
-from typing import List
-from langchain_core.documents import Document
-from langchain_core.runnables import chain
+import bs4
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+embeddings = OllamaEmbeddings(model="deepseek-r1:1.5b")
+vector_store = InMemoryVectorStore(embeddings)
 
-## pdf loading
-file_path = "./nke-10k-2023.pdf"
-loader = PyPDFLoader(file_path)
+## Loading Document
+# Only keep post title, headers, and content from the full HTML.
+bs4_strainer = bs4.filter.SoupStrainer(class_=("post-title", "post-header", "post-content"))
+loader = WebBaseLoader(
+    web_paths=("https://lilianweng.github.io/posts/2023-06-23-agent/",),
+    bs_kwargs={"parse_only": bs4_strainer},
+)
 docs = loader.load()
 
-## splitting
+assert len(docs) == 1
+
+## Splitting Document
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000, chunk_overlap=200, add_start_index=True
+    chunk_size=1000,  # chunk size (characters)
+    chunk_overlap=200,  # chunk overlap (characters)
+    add_start_index=True,  # track index in original document
 )
 all_splits = text_splitter.split_documents(docs)
 
-## embedding
-# embeddings = OllamaEmbeddings(model="deepseek-r1:8b")
-embeddings = OllamaEmbeddings(model="deepseek-r1:1.5b")
-vector_1 = embeddings.embed_query(all_splits[0].page_content)
-vector_2 = embeddings.embed_query(all_splits[1].page_content)
+## Storing Document
+document_ids = vector_store.add_documents(documents=all_splits)
 
-assert len(vector_1) == len(vector_2)
-
-## Vectore stores
-vector_store = InMemoryVectorStore(embeddings)
-ids = vector_store.add_documents(documents=all_splits)
-
-## Retriever
-retriever = vector_store.as_retriever(
-    search_type="similarity",
-    search_kwargs={"k": 1},
-)
-
-print(retriever.batch(
-    [
-        "How many distribution centers does Nike have in the US?",
-        "When was Nike incorporated?",
-    ],
-))
+print(document_ids[:3])
