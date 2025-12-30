@@ -2,6 +2,7 @@ from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain.agents import create_agent
 from langchain_core.vectorstores import InMemoryVectorStore
 import bs4
+from langchain.agents.middleware import dynamic_prompt, ModelRequest
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.tools import tool
@@ -39,33 +40,26 @@ all_splits = text_splitter.split_documents(docs)
 ## Storing Document
 document_ids = vector_store.add_documents(documents=all_splits)
 
-# print(document_ids[:3])
+@dynamic_prompt
+def prompt_with_context(request: ModelRequest) -> str:
+    """Inject context into state messages."""
+    last_query = request.state["messages"][-1].text
+    retrieved_docs = vector_store.similarity_search(last_query)
 
-@tool(response_format="content_and_artifact")
-def retrieve_context(query: str):
-    """Retrieve information to help answer a query."""
-    retrieved_docs = vector_store.similarity_search(query, k=2)
-    serialized = "\n\n".join(
-        (f"Source: {doc.metadata}\nContent: {doc.page_content}")
-        for doc in retrieved_docs
+    docs_content = "\n\n".join(doc.page_content for doc in retrieved_docs)
+
+    system_message = (
+        "You are a helpful assistant. Use the following context in your response:"
+        f"\n\n{docs_content}"
     )
-    return serialized, retrieved_docs
+
+    return system_message
 
 
-tools = [retrieve_context]
-# If desired, specify custom instructions
-prompt = (
-    "You have access to a tool that retrieves context from a blog post. "
-    "Use the tool to help answer user queries."
-)
-agent = create_agent(model, tools, system_prompt=prompt)
-query = (
-    "What is the standard method for Task Decomposition?\n\n"
-    "Once you get the answer, look up common extensions of that method."
-)
-
-for event in agent.stream(
+agent = create_agent(model, tools=[], middleware=[prompt_with_context])
+query = "What is task decomposition?"
+for step in agent.stream(
     {"messages": [{"role": "user", "content": query}]},
     stream_mode="values",
 ):
-    event["messages"][-1].pretty_print()
+    step["messages"][-1].pretty_print()
