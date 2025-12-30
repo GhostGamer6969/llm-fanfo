@@ -44,10 +44,13 @@ doc, score = results[0]
 # print(f"Score: {score}\n")
 # print(doc)
 
-@chain
-def retriever(query: str) -> List[Document]:
-    return vector_store.similarity_search(query, k=1)
-
+# @chain
+# def retriever(query: str) -> List[Document]:
+#     return vector_store.similarity_search(query, k=1)
+retriever = vector_store.as_retriever(
+    search_type="similarity",
+    search_kwargs={"k": 1},
+)
 
 print(retriever.batch(
     [
