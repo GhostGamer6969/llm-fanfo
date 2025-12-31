@@ -1,229 +1,253 @@
-from langchain.chat_models import init_chat_model
-from langchain.tools import tool
+from typing import Literal
+from typing import Callable
+import uuid
+
+from langchain.agents import AgentState
 from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware 
-from langgraph.checkpoint.memory import InMemorySaver 
-from langgraph.types import Command 
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware import ModelRequest, ModelResponse, wrap_model_call
+from langchain.messages import ToolMessage
+from langchain.messages import HumanMessage
+from langchain.tools import ToolRuntime, tool
+from langchain_ollama import ChatOllama
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+from typing_extensions import NotRequired
 
-model = init_chat_model(
-    "qwen2.5:7b",
-    model_provider="ollama",
-    temperature=0.7,
-    max_tokens=1024,
+model = ChatOllama(
+        model ="qwen2.5:7b",
+        temperature=0.7,
 )
+# Define the possible workflow steps
+SupportStep = Literal["warranty_collector", "issue_classifier", "resolution_specialist"]  
 
-## Tools
+
+class SupportState(AgentState):  
+    """State for customer support workflow."""
+    current_step: NotRequired[SupportStep]  
+    warranty_status: NotRequired[Literal["in_warranty", "out_of_warranty"]]
+    issue_type: NotRequired[Literal["hardware", "software"]]
+    
 @tool
-def create_calendar_event(
-    title: str,
-    start_time: str,       # ISO format: "2024-01-15T14:00:00"
-    end_time: str,         # ISO format: "2024-01-15T15:00:00"
-    attendees: list[str],  # email addresses
-    location: str = ""
-) -> str:
-    """Create a calendar event. Requires exact ISO datetime format."""
-    # Stub: In practice, this would call Google Calendar API, Outlook API, etc.
-    return f"Event created: {title} from {start_time} to {end_time} with {len(attendees)} attendees"
-
-
-@tool
-def send_email(
-    to: list[str],  # email addresses
-    subject: str,
-    body: str,
-    cc: list[str] = []
-) -> str:
-    """Send an email via email API. Requires properly formatted addresses."""
-    # Stub: In practice, this would call SendGrid, Gmail API, etc.
-    return f"Email sent to {', '.join(to)} - Subject: {subject}"
-
-
-@tool
-def get_available_time_slots(
-    attendees: list[str],
-    date: str,  # ISO format: "2024-01-15"
-    duration_minutes: int
-) -> list[str]:
-    """Check calendar availability for given attendees on a specific date."""
-    # Stub: In practice, this would query calendar APIs
-    return ["09:00", "14:00", "16:00"]
-@tool
-def schedule_event(request: str) -> str:
-    """Schedule calendar events using natural language.
-
-    Use this when the user wants to create, modify, or check calendar appointments.
-    Handles date/time parsing, availability checking, and event creation.
-
-    Input: Natural language scheduling request (e.g., 'meeting with design team
-    next Tuesday at 2pm')
-    """
-    result = calendar_agent.invoke({
-        "messages": [{"role": "user", "content": request}]
-    })
-    return result["messages"][-1].text
-
-
-@tool
-def manage_email(request: str) -> str:
-    """Send emails using natural language.
-
-    Use this when the user wants to send notifications, reminders, or any email
-    communication. Handles recipient extraction, subject generation, and email
-    composition.
-
-    Input: Natural language email request (e.g., 'send them a reminder about
-    the meeting')
-    """
-    result = email_agent.invoke({
-        "messages": [{"role": "user", "content": request}]
-    })
-    return result["messages"][-1].text
-
-
-## Calendar Agent
-CALENDAR_AGENT_PROMPT = (
-    "You are a calendar scheduling assistant. "
-    "Parse natural language scheduling requests (e.g., 'next Tuesday at 2pm') "
-    "into proper ISO datetime formats. "
-    "Use get_available_time_slots to check availability when needed. "
-    "Use create_calendar_event to schedule events. "
-    "Always confirm what was scheduled in your final response."
-)
-
-calendar_agent = create_agent(
-    model,
-    tools=[create_calendar_event, get_available_time_slots],
-    system_prompt=CALENDAR_AGENT_PROMPT,
-    middleware=[ 
-        HumanInTheLoopMiddleware( 
-            interrupt_on={"create_calendar_event": True}, 
-            description_prefix="Calendar event pending approval", 
-        ), 
-    ],
-)
-# query = "Schedule a team meeting next Tuesday at 2pm for 1 hour"
-#
-# for step in calendar_agent.stream(
-#     {"messages": [{"role": "user", "content": query}]}
-# ):
-#     for update in step.values():
-#         for message in update.get("messages", []):
-#             message.pretty_print()
-#
-
-## Email Agent
-EMAIL_AGENT_PROMPT = (
-    "You are an email assistant. "
-    "Compose professional emails based on natural language requests. "
-    "Extract recipient information and craft appropriate subject lines and body text. "
-    "Use send_email to send the message. "
-    "Always confirm what was sent in your final response."
-)
-
-email_agent = create_agent(
-    model,
-    tools=[send_email],
-    system_prompt=EMAIL_AGENT_PROMPT,
-    middleware=[ 
-        HumanInTheLoopMiddleware( 
-            interrupt_on={"send_email": True}, 
-            description_prefix="Outbound email pending approval", 
-        ), 
-    ], 
-)
-# query = "Send the design team a reminder about reviewing the new mockups"
-#
-# for step in email_agent.stream(
-#     {"messages": [{"role": "user", "content": query}]}
-# ):
-#     for update in step.values():
-#         for message in update.get("messages", []):
-#             message.pretty_print()
-SUPERVISOR_PROMPT = (
-    "You are a helpful personal assistant. "
-    "You can schedule calendar events and send emails. "
-    "Break down user requests into appropriate tool calls and coordinate the results. "
-    "When a request involves multiple actions, use multiple tools in sequence."
-)
-
-supervisor_agent = create_agent(
-    model,
-    tools=[schedule_event ,manage_email],
-    system_prompt=SUPERVISOR_PROMPT,
-    checkpointer=InMemorySaver(), 
-)
-# query = "Schedule a team standup for tomorrow at 9am"
-#
-# for step in supervisor_agent.stream(
-#     {"messages": [{"role": "user", "content": query}]}
-# ):
-#     for update in step.values():
-#         for message in update.get("messages", []):
-#             message.pretty_print()
-#
-#
-# print("\n\n\n\nEnd of query1\n\n\n\n")
-# query = (
-#     "Schedule a meeting with the design team next Tuesday at 2pm for 1 hour, "
-#     "and send them an email reminder about reviewing the new mockups."
-# )
-#
-# for step in supervisor_agent.stream(
-#     {"messages": [{"role": "user", "content": query}]}
-# ):
-#     for update in step.values():
-#         for message in update.get("messages", []):
-#             message.pretty_print()
-query = (
-    "Schedule a meeting with the design team next Tuesday at 2pm for 1 hour, "
-    "and send them an email reminder about reviewing the new mockups."
-)
-
-config = {"configurable": {"thread_id": "6"}}
-
-interrupts = []
-for step in supervisor_agent.stream(
-    {"messages": [{"role": "user", "content": query}]},
-    config,
-):
-    for update in step.values():
-        if isinstance(update, dict):
-            for message in update.get("messages", []):
-                message.pretty_print()
-        else:
-            interrupt_ = update[0]
-            interrupts.append(interrupt_)
-            print(f"\nINTERRUPTED: {interrupt_.id}")
-
-
-# for interrupt_ in interrupts:
-#     for request in interrupt_.value["action_requests"]:
-#         print(f"INTERRUPTED: {interrupt_.id}")
-#         print(f"{request['description']}\n")
-#96557608829058d2f68309b37837d552
-
-resume = {}
-for interrupt_ in interrupts:
-    if interrupt_.id == "96557608829058d2f68309b37837d552":
-        # Edit email
-        edited_action = interrupt_.value["action_requests"][0].copy()
-        edited_action["arguments"]["subject"] = "Mockups reminder"
-        resume[interrupt_.id] = {
-            "decisions": [{"type": "edit", "edited_action": edited_action}]
+def record_warranty_status(
+    status: Literal["in_warranty", "out_of_warranty"],
+    runtime: ToolRuntime[None, SupportState],
+) -> Command:  
+    """Record the customer's warranty status and transition to issue classification."""
+    return Command(  
+        update={  
+            "messages": [
+                ToolMessage(
+                    content=f"Warranty status recorded as: {status}",
+                    tool_call_id=runtime.tool_call_id,
+                )
+            ],
+            "warranty_status": status,
+            "current_step": "issue_classifier",  
         }
-    else:
-        resume[interrupt_.id] = {"decisions": [{"type": "approve"}]}
+    )
 
-interrupts = []
-for step in supervisor_agent.stream(
-    Command(resume=resume), 
-    config,
-):
-    for update in step.values():
-        if isinstance(update, dict):
-            for message in update.get("messages", []):
-                message.pretty_print()
-        else:
-            interrupt_ = update[0]
-            interrupts.append(interrupt_)
-            print(f"\nINTERRUPTED: {interrupt_.id}")
+
+@tool
+def record_issue_type(
+    issue_type: Literal["hardware", "software"],
+    runtime: ToolRuntime[None, SupportState],
+) -> Command:  
+    """Record the type of issue and transition to resolution specialist."""
+    return Command(  
+        update={  
+            "messages": [
+                ToolMessage(
+                    content=f"Issue type recorded as: {issue_type}",
+                    tool_call_id=runtime.tool_call_id,
+                )
+            ],
+            "issue_type": issue_type,
+            "current_step": "resolution_specialist",  
+        }
+    )
+
+
+@tool
+def escalate_to_human(reason: str) -> str:
+    """Escalate the case to a human support specialist."""
+    # In a real system, this would create a ticket, notify staff, etc.
+    return f"Escalating to human support. Reason: {reason}"
+
+
+@tool
+def provide_solution(solution: str) -> str:
+    """Provide a solution to the customer's issue."""
+    return f"Solution provided: {solution}"
+
+@tool
+def go_back_to_warranty() -> Command:  
+    """Go back to warranty verification step."""
+    return Command(update={"current_step": "warranty_collector"})  
+
+
+@tool
+def go_back_to_classification() -> Command:  
+    """Go back to issue classification step."""
+    return Command(update={"current_step": "issue_classifier"})  
+
+
+# Define prompts as constants for easy reference
+WARRANTY_COLLECTOR_PROMPT = """You are a customer support agent helping with device issues.
+
+CURRENT STAGE: Warranty verification
+
+At this step, you need to:
+1. Greet the customer warmly
+2. Ask if their device is under warranty
+3. Use record_warranty_status to record their response and move to the next step
+
+Be conversational and friendly. Don't ask multiple questions at once."""
+
+ISSUE_CLASSIFIER_PROMPT = """You are a customer support agent helping with device issues.
+
+CURRENT STAGE: Issue classification
+CUSTOMER INFO: Warranty status is {warranty_status}
+
+At this step, you need to:
+1. Ask the customer to describe their issue
+2. Determine if it's a hardware issue (physical damage, broken parts) or software issue (app crashes, performance)
+3. Use record_issue_type to record the classification and move to the next step
+
+If unclear, ask clarifying questions before classifying."""
+
+RESOLUTION_SPECIALIST_PROMPT = """You are a customer support agent helping with device issues.
+
+CURRENT STAGE: Resolution
+CUSTOMER INFO: Warranty status is {warranty_status}, issue type is {issue_type}
+
+At this step, you need to:
+1. For SOFTWARE issues: provide troubleshooting steps using provide_solution
+2. For HARDWARE issues:
+   - If IN WARRANTY: explain warranty repair process using provide_solution
+   - If OUT OF WARRANTY: escalate_to_human for paid repair options
+
+If the customer indicates any information was wrong, use:
+- go_back_to_warranty to correct warranty status
+- go_back_to_classification to correct issue type
+
+Be specific and helpful in your solutions."""
+# Step configuration: maps step name to (prompt, tools, required_state)
+STEP_CONFIG = {
+    "warranty_collector": {
+        "prompt": WARRANTY_COLLECTOR_PROMPT,
+        "tools": [record_warranty_status],
+        "requires": [],
+    },
+    "issue_classifier": {
+        "prompt": ISSUE_CLASSIFIER_PROMPT,
+        "tools": [record_issue_type],
+        "requires": ["warranty_status"],
+    },
+    "resolution_specialist": {
+        "prompt": RESOLUTION_SPECIALIST_PROMPT,
+        "tools": [provide_solution, escalate_to_human],
+        "requires": ["warranty_status", "issue_type"],
+    },
+}
+
+STEP_CONFIG["resolution_specialist"]["tools"].extend([
+    go_back_to_warranty,
+    go_back_to_classification
+])
+
+@wrap_model_call
+def apply_step_config(
+    request: ModelRequest,
+    handler: Callable[[ModelRequest], ModelResponse],
+) -> ModelResponse:
+    """Configure agent behavior based on the current step."""
+    # Get current step (defaults to warranty_collector for first interaction)
+    current_step = request.state.get("current_step", "warranty_collector")  
+
+    # Look up step configuration
+    stage_config = STEP_CONFIG[current_step]  
+
+    # Validate required state exists
+    for key in stage_config["requires"]:
+        if request.state.get(key) is None:
+            raise ValueError(f"{key} must be set before reaching {current_step}")
+
+    # Format prompt with state values (supports {warranty_status}, {issue_type}, etc.)
+    system_prompt = stage_config["prompt"].format(**request.state)
+
+    # Inject system prompt and step-specific tools
+    request = request.override(  
+        system_prompt=system_prompt,  
+        tools=stage_config["tools"],  
+    )
+
+    return handler(request)
+
+# Collect all tools from all step configurations
+all_tools = [
+    record_warranty_status,
+    record_issue_type,
+    provide_solution,
+    escalate_to_human,
+    go_back_to_warranty,
+    go_back_to_classification
+]
+
+# Create the agent with step-based configuration
+agent = create_agent(
+    model,
+    tools=all_tools,
+    state_schema=SupportState,  
+    middleware=[apply_step_config,
+        SummarizationMiddleware(  
+            model,
+            trigger=("tokens", 4000),
+            keep=("messages", 10)
+        )
+    ],  
+    checkpointer=InMemorySaver(),  
+)
+
+# Configuration for this conversation thread
+thread_id = str(uuid.uuid4())
+config = {"configurable": {"thread_id": thread_id}}
+
+# Turn 1: Initial message - starts with warranty_collector step
+print("=== Turn 1: Warranty Collection ===")
+result = agent.invoke(
+    {"messages": [HumanMessage("Hi, my phone screen is cracked")]},
+    config
+)
+for msg in result['messages']:
+    msg.pretty_print()
+
+# Turn 2: User responds about warranty
+print("\n=== Turn 2: Warranty Response ===")
+result = agent.invoke(
+    {"messages": [HumanMessage("Yes, it's still under warranty")]},
+    config
+)
+for msg in result['messages']:
+    msg.pretty_print()
+print(f"Current step: {result.get('current_step')}")
+
+# Turn 3: User describes the issue
+print("\n=== Turn 3: Issue Description ===")
+result = agent.invoke(
+    {"messages": [HumanMessage("The screen is physically cracked from dropping it")]},
+    config
+)
+for msg in result['messages']:
+    msg.pretty_print()
+print(f"Current step: {result.get('current_step')}")
+
+# Turn 4: Resolution
+print("\n=== Turn 4: Resolution ===")
+result = agent.invoke(
+    {"messages": [HumanMessage("What should I do?")]},
+    config
+)
+for msg in result['messages']:
+    msg.pretty_print()
+
